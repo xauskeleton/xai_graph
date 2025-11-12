@@ -6,6 +6,7 @@ from torchvision.ops import roi_align
 import torch_geometric as pyg
 from torch_geometric.data import Data, Batch
 from torch_geometric.nn import GATv2Conv, global_mean_pool, GCNConv 
+import torchvision.transforms as T
 
 
 class FasterRCNNFeatureExtractor(nn.Module):
@@ -21,8 +22,11 @@ class FasterRCNNFeatureExtractor(nn.Module):
         self.backbone = frcnn.backbone
         self.rpn = frcnn.rpn
         
-        # Transform để chuẩn hóa input cho torchvision models
-        self.transform = frcnn.transform
+        # ✅ TỰ TẠO NORMALIZE TRANSFORM (không dùng frcnn.transform)
+        self.normalize = T.Normalize(
+            mean=[0.485, 0.456, 0.406],
+            std=[0.229, 0.224, 0.225]
+        )
         
         # Giảm chiều feature (256 channels * 7 * 7 = 12544)
         self.fc = nn.Sequential(
@@ -32,42 +36,73 @@ class FasterRCNNFeatureExtractor(nn.Module):
             nn.Linear(1024, feature_dim)
         )
         
-        # Freeze backbone
+        # Freeze backbone và RPN
         for param in self.backbone.parameters():
             param.requires_grad = False
         for param in self.rpn.parameters():
             param.requires_grad = False
             
+        self.backbone.eval()
+        self.rpn.eval()
+
+    def preprocess_images(self, images_list):
+        """
+        Tự xử lý resize và normalize (KHÔNG dùng frcnn.transform)
+        Args:
+            images_list: list of [3, H, W] tensors
+        Returns:
+            images_tensor: [B, 3, H_max, W_max] - padded batch
+            original_sizes: list of (H, W) tuples
+        """
+        original_sizes = [img.shape[-2:] for img in images_list]
+        
+        # Normalize từng ảnh
+        normalized = [self.normalize(img) for img in images_list]
+        
+        # Tìm kích thước max để pad
+        max_h = max(img.shape[1] for img in normalized)
+        max_w = max(img.shape[2] for img in normalized)
+        
+        # Pad về cùng kích thước
+        batch = []
+        for img in normalized:
+            c, h, w = img.shape
+            padded = torch.zeros(c, max_h, max_w, device=img.device, dtype=img.dtype)
+            padded[:, :h, :w] = img
+            batch.append(padded)
+        
+        images_tensor = torch.stack(batch)  # [B, 3, H_max, W_max]
+        return images_tensor, original_sizes
+        
     def forward(self, images_list):
         """
         Args:
-            images: [B, 3, H, W] - tensor đã normalize
+            images_list: list of [3, H, W] tensors (đã ToTensor() từ dataloader)
         Returns:
             features: [B, num_objects, feature_dim]
             boxes: [B, num_objects, 4] - normalized to [0, 1]
         """
         batch_size = len(images_list)
-        original_image_sizes = [img.shape[-2:] for img in images_list]
+        
+        # ✅ TỰ PREPROCESS (không gọi self.transform)
+        images_tensor, original_sizes = self.preprocess_images(images_list)
         
         with torch.no_grad():
-            # Transform images (resize, normalize)
-            images_transformed, _ = self.transform(
-                [images_list[i] for i in range(batch_size)],
-                None
-            )
-            
             # Extract features từ backbone
-            features = self.backbone(images_transformed.tensors)
+            features = self.backbone(images_tensor)
             
-            # Tạo proposals
-            proposals, _ = self.rpn(images_transformed, features)
+            # Tạo proposals (RPN luôn ở eval mode)
+            # Cần tạo ImageList object cho RPN
+            from torchvision.models.detection.image_list import ImageList
+            image_list = ImageList(images_tensor, original_sizes)
+            proposals, _ = self.rpn(image_list, features)
         
         # Lấy feature map ở level '0' (P2 - stride 4)
         feature_map = features['0']  # [B, 256, H_feat, W_feat]
         
-        # Tính spatial_scale: tỷ lệ giữa feature map và image gốc
+        # Tính spatial_scale
         _, _, h_feat, w_feat = feature_map.shape
-        _, _, h_img, w_img = images_transformed.tensors.shape
+        _, _, h_img, w_img = images_tensor.shape
         spatial_scale = h_feat / h_img
         
         all_features = []
@@ -91,7 +126,7 @@ class FasterRCNNFeatureExtractor(nn.Module):
                 [boxes],
                 output_size=(7, 7),
                 spatial_scale=spatial_scale,
-                aligned=True  # Tăng độ chính xác
+                aligned=True
             )
             
             # Flatten và project xuống feature_dim
@@ -99,7 +134,7 @@ class FasterRCNNFeatureExtractor(nn.Module):
             feats = self.fc(rois)  # [num_objects, feature_dim]
             
             # Normalize boxes về [0, 1]
-            h, w = original_image_sizes[i]
+            h, w = original_sizes[i]
             normalized_boxes = boxes.clone()
             normalized_boxes[:, [0, 2]] /= w
             normalized_boxes[:, [1, 3]] /= h
@@ -172,13 +207,19 @@ class GraphConstructor(nn.Module):
         union = area_i.unsqueeze(2) + area_j.unsqueeze(1) - intersection
         iou = (intersection / (union + 1e-6)).unsqueeze(-1)  # [B, N, N, 1]
         
+        # Aspect ratio difference
+        aspect_i = sizes_i[..., 0] / (sizes_i[..., 1] + 1e-6)  # [B, N, 1]
+        aspect_j = sizes_j[..., 0] / (sizes_j[..., 1] + 1e-6)  # [B, 1, N]
+        aspect_diff = (aspect_j / (aspect_i + 1e-6)).unsqueeze(-1)  # [B, N, N, 1]
+
         # Concatenate all features
         spatial_feats = torch.cat([
             rel_pos,      # 2
             dist,         # 1
             angle,        # 1
             rel_size,     # 2
-            iou          # 1
+            iou,          # 1
+            aspect_diff   #1
         ], dim=-1)  # [B, N, N, 8]
         
         return spatial_feats
