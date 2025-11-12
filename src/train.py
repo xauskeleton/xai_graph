@@ -31,9 +31,9 @@ NUM_OBJECTS = 36
 GNN_LAYERS = 3
 GNN_HEADS = 4
 K_NEIGHBORS = 10
-NUM_EPOCHS = 20
+NUM_EPOCHS = 30
 BATCH_SIZE = 16
-LEARNING_RATE = 1e-4
+LEARNING_RATE = 2e-5
 
 # Checkpoint
 CHECKPOINT_DIR = "checkpoints"
@@ -79,10 +79,12 @@ def main():
     criterion = nn.CrossEntropyLoss(ignore_index=PAD_TOKEN_ID)
     optimizer = optim.Adam(
         filter(lambda p: p.requires_grad, model.parameters()), 
-        lr=LEARNING_RATE
+        lr=LEARNING_RATE,
+        weight_decay=1e-5
     )
     
     best_test_loss = float('inf')
+
 
     # --- 3. VÒNG LẶP HUẤN LUYỆN ---
     print(f"\n--- 🔥 BẮT ĐẦU HUẤN LUYỆN VỚI {NUM_EPOCHS} EPOCHS ---")
@@ -93,7 +95,7 @@ def main():
         # --- Giai đoạn TRAIN ---
         model.train()
         train_loss = 0.0
-        
+
         loop = tqdm(train_loader, leave=True)
         # Sửa `images` thành `images_list` để rõ ràng
         for i, (images_list, token_batch) in enumerate(loop): 

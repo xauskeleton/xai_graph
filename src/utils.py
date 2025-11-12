@@ -14,14 +14,16 @@ def load_checkpoint(model, checkpoint_path, device='cuda'):
     return model
 
 
-def save_checkpoint(model, optimizer, epoch, loss, path):
-    """Save model checkpoint"""
-    torch.save({
-        'epoch': epoch,
-        'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'loss': loss,
-    }, path)
+def save_checkpoint(state, path):
+    """
+    Lưu checkpoint (state dictionary) vào một file.
+    Args:
+        state (dict): Dictionary chứa mọi thứ bạn muốn lưu.
+        path (str): Đường dẫn file để lưu.
+    """
+    print("=> Đang lưu checkpoint...")
+    torch.save(state, path)
+    print(f"=> Đã lưu checkpoint tại {path}")
 
 
 def get_model_summary(model):

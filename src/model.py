@@ -6,29 +6,26 @@ from torchvision.ops import roi_align
 import torch_geometric as pyg
 from torch_geometric.data import Data, Batch
 from torch_geometric.nn import GATv2Conv, global_mean_pool, GCNConv 
-import torchvision.transforms as T
 
 
 class FasterRCNNFeatureExtractor(nn.Module):
-    """Trích xuất đặc trưng từ ảnh bằng Faster R-CNN với spatial_scale đúng"""
+    """
+    Trích xuất đặc trưng, đã sửa lỗi 'targets should not be None'
+    và lỗi 'spatial_scale'.
+    """
     
     def __init__(self, num_objects=36, feature_dim=512):
         super().__init__()
         self.num_objects = num_objects
         self.feature_dim = feature_dim
         
-        # Load Faster R-CNN pre-trained
         frcnn = fasterrcnn_resnet50_fpn(weights='DEFAULT')
         self.backbone = frcnn.backbone
         self.rpn = frcnn.rpn
         
-        # ✅ TỰ TẠO NORMALIZE TRANSFORM (không dùng frcnn.transform)
-        self.normalize = T.Normalize(
-            mean=[0.485, 0.456, 0.406],
-            std=[0.229, 0.224, 0.225]
-        )
+        # Transform này nhận LIST ảnh thô
+        self.transform = frcnn.transform 
         
-        # Giảm chiều feature (256 channels * 7 * 7 = 12544)
         self.fc = nn.Sequential(
             nn.Linear(256 * 7 * 7, 1024),
             nn.ReLU(),
@@ -36,83 +33,68 @@ class FasterRCNNFeatureExtractor(nn.Module):
             nn.Linear(1024, feature_dim)
         )
         
-        # Freeze backbone và RPN
+        # 1. Đóng băng tham số (Freeze)
         for param in self.backbone.parameters():
             param.requires_grad = False
         for param in self.rpn.parameters():
             param.requires_grad = False
             
+        # 2. Đặt ở chế độ eval() ban đầu
         self.backbone.eval()
         self.rpn.eval()
+            
+    # --- 3. GHI ĐÈ HÀM TRAIN() (SỬA LỖI 'targets') ---
+    def train(self, mode: bool = True):
+        """
+        Ghi đè (override) hàm train() của nn.Module.
+        Mục đích: Giữ cho backbone và rpn LUÔN LUÔN ở chế độ .eval()
+        """
+        # Đặt các lớp "học được" (như self.fc) vào chế độ `mode`
+        self.fc.train(mode)
+        
+        # Ép backbone và rpn luôn ở eval()
+        self.backbone.eval()
+        self.rpn.eval()
+        
+        return self
+    # --- KẾT THÚC SỬA LỖI 'targets' ---
 
-    def preprocess_images(self, images_list):
-        """
-        Tự xử lý resize và normalize (KHÔNG dùng frcnn.transform)
-        Args:
-            images_list: list of [3, H, W] tensors
-        Returns:
-            images_tensor: [B, 3, H_max, W_max] - padded batch
-            original_sizes: list of (H, W) tuples
-        """
-        original_sizes = [img.shape[-2:] for img in images_list]
-        
-        # Normalize từng ảnh
-        normalized = [self.normalize(img) for img in images_list]
-        
-        # Tìm kích thước max để pad
-        max_h = max(img.shape[1] for img in normalized)
-        max_w = max(img.shape[2] for img in normalized)
-        
-        # Pad về cùng kích thước
-        batch = []
-        for img in normalized:
-            c, h, w = img.shape
-            padded = torch.zeros(c, max_h, max_w, device=img.device, dtype=img.dtype)
-            padded[:, :h, :w] = img
-            batch.append(padded)
-        
-        images_tensor = torch.stack(batch)  # [B, 3, H_max, W_max]
-        return images_tensor, original_sizes
-        
-    def forward(self, images_list):
+    def forward(self, images_list): # Nhận 1 list ảnh thô [3, H, W]
         """
         Args:
-            images_list: list of [3, H, W] tensors (đã ToTensor() từ dataloader)
-        Returns:
-            features: [B, num_objects, feature_dim]
-            boxes: [B, num_objects, 4] - normalized to [0, 1]
+            images_list: list[Tensor]
         """
         batch_size = len(images_list)
+        original_image_sizes = [img.shape[-2:] for img in images_list]
         
-        # ✅ TỰ PREPROCESS (không gọi self.transform)
-        images_tensor, original_sizes = self.preprocess_images(images_list)
-        
+        # Luôn chạy no_grad() vì các lớp này đã bị đóng băng
         with torch.no_grad():
-            # Extract features từ backbone
-            features = self.backbone(images_tensor)
+            # Đưa list ảnh thô vào transform
+            images_transformed, _ = self.transform(
+                images_list, 
+                None
+            )
             
-            # Tạo proposals (RPN luôn ở eval mode)
-            # Cần tạo ImageList object cho RPN
-            from torchvision.models.detection.image_list import ImageList
-            image_list = ImageList(images_tensor, original_sizes)
-            proposals, _ = self.rpn(image_list, features)
+            # `images_transformed.tensors` là 1 batch [B, 3, H_trans, W_trans]
+            features = self.backbone(images_transformed.tensors)
+            
+            # RPN (đang ở .eval() mode) sẽ không đòi 'targets'
+            proposals, _ = self.rpn(images_transformed, features)
         
-        # Lấy feature map ở level '0' (P2 - stride 4)
-        feature_map = features['0']  # [B, 256, H_feat, W_feat]
+        feature_map = features['0'] # Map P2
         
-        # Tính spatial_scale
+        # --- SỬA LỖI spatial_scale ---
         _, _, h_feat, w_feat = feature_map.shape
-        _, _, h_img, w_img = images_tensor.shape
-        spatial_scale = h_feat / h_img
+        _, _, h_img_trans, w_img_trans = images_transformed.tensors.shape
+        spatial_scale = h_feat / h_img_trans
+        # --- KẾT THÚC SỬA ---
         
         all_features = []
         all_boxes = []
         
         for i in range(batch_size):
-            # Lấy top-k proposals và đảm bảo có đủ
             boxes = proposals[i][:self.num_objects]
             
-            # Padding nếu không đủ proposals
             if len(boxes) < self.num_objects:
                 padding = torch.zeros(
                     self.num_objects - len(boxes), 4,
@@ -120,30 +102,34 @@ class FasterRCNNFeatureExtractor(nn.Module):
                 )
                 boxes = torch.cat([boxes, padding], dim=0)
             
-            # ROI Align với spatial_scale đúng
+            current_feature_map = feature_map[i:i+1]
+
             rois = roi_align(
-                feature_map[i:i+1],
-                [boxes],
+                current_feature_map,
+                [boxes], # Tọa độ trên ảnh đã transform
                 output_size=(7, 7),
-                spatial_scale=spatial_scale,
+                spatial_scale=spatial_scale, # Tỷ lệ đã sửa
                 aligned=True
             )
             
-            # Flatten và project xuống feature_dim
-            rois = rois.view(rois.size(0), -1)  # [num_objects, 256*7*7]
-            feats = self.fc(rois)  # [num_objects, feature_dim]
+            rois = rois.view(rois.size(0), -1)
+            feats = self.fc(rois)
             
             # Normalize boxes về [0, 1]
-            h, w = original_sizes[i]
-            normalized_boxes = boxes.clone()
-            normalized_boxes[:, [0, 2]] /= w
-            normalized_boxes[:, [1, 3]] /= h
+            h_orig, w_orig = original_image_sizes[i]
+            # `boxes` là tọa độ trên ảnh đã transform, ta cần map nó về
+            # ảnh gốc, nhưng đơn giản hơn là normalize theo ảnh đã transform
             
+            normalized_boxes = boxes.clone()
+            normalized_boxes[:, [0, 2]] /= w_img_trans
+            normalized_boxes[:, [1, 3]] /= h_img_trans
+            normalized_boxes = normalized_boxes.clamp(0, 1)
+
             all_features.append(feats)
             all_boxes.append(normalized_boxes)
         
-        features = torch.stack(all_features)  # [B, num_objects, feature_dim]
-        boxes = torch.stack(all_boxes)  # [B, num_objects, 4]
+        features = torch.stack(all_features)
+        boxes = torch.stack(all_boxes)
         
         return features, boxes
 
@@ -304,7 +290,7 @@ class MotifGNN(nn.Module):
             nn.Linear(feature_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.ReLU(),
-            nn.Dropout(0.1)
+            nn.Dropout(0.15)
         )
         
         # GAT layers with edge features
@@ -317,7 +303,7 @@ class MotifGNN(nn.Module):
                     hidden_dim,
                     hidden_dim // heads,
                     heads=heads,
-                    dropout=0.1,
+                    dropout=0.15,
                     edge_dim=feature_dim,  # Edge features
                     concat=True
                 )
