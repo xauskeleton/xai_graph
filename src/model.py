@@ -38,7 +38,7 @@ class FasterRCNNFeatureExtractor(nn.Module):
         for param in self.rpn.parameters():
             param.requires_grad = False
             
-    def forward(self, images):
+    def forward(self, images_list):
         """
         Args:
             images: [B, 3, H, W] - tensor đã normalize
@@ -46,13 +46,13 @@ class FasterRCNNFeatureExtractor(nn.Module):
             features: [B, num_objects, feature_dim]
             boxes: [B, num_objects, 4] - normalized to [0, 1]
         """
-        batch_size = images.shape[0]
-        original_image_sizes = [img.shape[-2:] for img in images]
+        batch_size = len(images_list)
+        original_image_sizes = [img.shape[-2:] for img in images_list]
         
         with torch.no_grad():
             # Transform images (resize, normalize)
             images_transformed, _ = self.transform(
-                [images[i] for i in range(batch_size)],
+                [images_list[i] for i in range(batch_size)],
                 None
             )
             

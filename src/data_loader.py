@@ -4,7 +4,6 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from PIL import Image
 import torchvision.transforms as transforms
-# --- THÊM CÁC THƯ VIỆN CẦN THIẾT ---
 from transformers import AutoTokenizer
 
 class KTVICDataset(Dataset):
@@ -51,7 +50,7 @@ class CollateFn:
         images = [item[0] for item in batch]
         captions = [item[1] for item in batch]
 
-        images_batch = torch.stack(images, dim=0)
+        images_batch_list = images
 
         tokenized_batch = self.tokenizer(
             captions,
@@ -61,17 +60,12 @@ class CollateFn:
             return_tensors="pt"
         )
 
-        return images_batch, tokenized_batch
+        return images_batch_list, tokenized_batch
 
 def get_loader(json_file, image_dir, tokenizer, batch_size=32, shuffle=True, num_workers=4):
     
     transform = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-        transforms.Normalize(
-            mean=[0.485, 0.456, 0.406],
-            std=[0.229, 0.224, 0.225]
-        )
+        transforms.ToTensor()
     ])
 
     dataset = KTVICDataset(
@@ -80,8 +74,6 @@ def get_loader(json_file, image_dir, tokenizer, batch_size=32, shuffle=True, num
         transform=transform,
     )
 
-    # --- SỬA Ở ĐÂY ---
-    # Khởi tạo CollateFn với tokenizer
     collate_fn = CollateFn(tokenizer)
 
     data_loader = DataLoader(
@@ -89,7 +81,7 @@ def get_loader(json_file, image_dir, tokenizer, batch_size=32, shuffle=True, num
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=num_workers,
-        collate_fn=collate_fn  # <-- Dùng collate_fn mới
+        collate_fn=collate_fn 
     )
 
     return data_loader, dataset
@@ -97,6 +89,7 @@ def get_loader(json_file, image_dir, tokenizer, batch_size=32, shuffle=True, num
 
 if __name__ == '__main__':
     
+    # --- Cấu hình đường dẫn (Hãy sửa lại cho đúng) ---
     TRAIN_JSON_PATH = 'data/train_data.json' 
     TRAIN_IMAGE_DIR = 'data/train/'
     TEST_JSON_PATH = 'data/test_data.json'
@@ -106,55 +99,62 @@ if __name__ == '__main__':
     
     print("--- 🤖 Đang tải Tokenizer (PhoBERT) ---")
     try:
-        # Tải tokenizer PhoBERT
         # (Cần cài đặt: pip install transformers)
         tokenizer = AutoTokenizer.from_pretrained('vinai/phobert-base')
         print(f"✅ Tải tokenizer thành công! Vocab size: {tokenizer.vocab_size}")
 
+        # --- Test TRAIN Loader ---
         print("\n--- 🚀 Đang khởi tạo DataLoader cho TẬP HUẤN LUYỆN (Train) ---")
         train_loader, train_dataset = get_loader(
             json_file=TRAIN_JSON_PATH,
             image_dir=TRAIN_IMAGE_DIR,
-            tokenizer=tokenizer, # <-- Truyền tokenizer vào
+            tokenizer=tokenizer,
             batch_size=BATCH_SIZE,
             shuffle=True
         )
         print(f"✅ Tải thành công! Tổng số mẫu huấn luyện: {len(train_dataset)}")
         
         # Lấy thử 1 batch train
-        # Đầu ra thứ 2 bây giờ là 1 dictionary
-        train_images, train_tokens = next(iter(train_loader))
+        train_images_list, train_tokens = next(iter(train_loader))
         
-        print(f"   -> Kích thước batch ảnh train: {train_images.shape}")
+        print(f"   -> Kiểu dữ liệu batch ảnh: {type(train_images_list)}")
+        print(f"   -> Số lượng ảnh trong batch: {len(train_images_list)}")
+        print(f"   -> Kích thước ảnh đầu tiên: {train_images_list[0].shape}")
+        
         print(f"   -> Dữ liệu text (dictionary keys): {train_tokens.keys()}")
         print(f"   -> Kích thước input_ids: {train_tokens['input_ids'].shape}")
-        print(f"   -> Kích thước attention_mask: {train_tokens['attention_mask'].shape}")
         
-        # Giải mã (decode) caption đầu tiên để xem
-        first_caption_ids = train_tokens['input_ids'][0]
-        first_caption_text = tokenizer.decode(first_caption_ids, skip_special_tokens=False)
-        print(f"   -> Caption 0 (dạng số): {first_caption_ids}")
+        first_caption_text = tokenizer.decode(train_tokens['input_ids'][0], skip_special_tokens=False)
         print(f"   -> Caption 0 (dạng chữ): {first_caption_text}")
 
-
+        # --- Test TEST Loader ---
         print("\n--- 🧪 Đang khởi tạo DataLoader cho TẬP KIỂM TRA (Test) ---")
         test_loader, test_dataset = get_loader(
             json_file=TEST_JSON_PATH,
             image_dir=TEST_IMAGE_DIR,
-            tokenizer=tokenizer, # <-- Truyền tokenizer vào
+            tokenizer=tokenizer,
             batch_size=BATCH_SIZE,
             shuffle=False
         )
         print(f"✅ Tải thành công! Tổng số mẫu kiểm tra: {len(test_dataset)}")
 
         # Lấy thử 1 batch test
-        test_images, test_tokens = next(iter(test_loader))
-        print(f"   -> Kích thước batch ảnh test: {test_images.shape}")
+        test_images_list, test_tokens = next(iter(test_loader))
+        print(f"   -> Kiểu dữ liệu batch ảnh test: {type(test_images_list)}")
+        print(f"   -> Số lượng ảnh trong batch: {len(test_images_list)}")
+        print(f"   -> Kích thước ảnh đầu tiên (test): {test_images_list[0].shape}")
         print(f"   -> Kích thước input_ids (test): {test_tokens['input_ids'].shape}")
 
     except ImportError:
         print("\n❌ LỖI: Không tìm thấy thư viện 'transformers'.")
         print("   Vui lòng cài đặt bằng lệnh: pip install transformers")
+    except FileNotFoundError as e:
+        print(f"\n❌ LỖI: KHÔNG TÌM THẤY FILE. Hãy kiểm tra lại đường dẫn!")
+        print(f"   Chi tiết lỗi: {e}")
+        print(f"   Các đường dẫn đang dùng:")
+        print(f"   TRAIN_JSON_PATH: '{TRAIN_JSON_PATH}'")
+        print(f"   TRAIN_IMAGE_DIR: '{TRAIN_IMAGE_DIR}'")
+        print(f"   TEST_JSON_PATH: '{TEST_JSON_PATH}'")
+        print(f"   TEST_IMAGE_DIR: '{TEST_IMAGE_DIR}'")
     except Exception as e:
-        print(f"\n❌ LỖI: {e}")
-        print(f"   Hãy kiểm tra lại các đường dẫn trong file data_loader.py")
+        print(f"\n❌ LỖI KHÁC: {e}")
